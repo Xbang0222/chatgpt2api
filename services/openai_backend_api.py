@@ -624,8 +624,6 @@ class OpenAIBackendAPI:
             content = message.get("content") or {}
             if author.get("role") != "tool":
                 continue
-            if metadata.get("async_task_type") != "image_gen":
-                continue
             if content.get("content_type") != "multimodal_text":
                 continue
             file_ids, sediment_ids = [], []
@@ -638,6 +636,8 @@ class OpenAIBackendAPI:
                 for hit in sed_pat.findall(text):
                     if hit not in sediment_ids:
                         sediment_ids.append(hit)
+            if metadata.get("async_task_type") != "image_gen" and not file_ids and not sediment_ids:
+                continue
             records.append(
                 {"message_id": message_id, "create_time": message.get("create_time") or 0, "file_ids": file_ids,
                  "sediment_ids": sediment_ids})

@@ -56,6 +56,8 @@ def is_token_invalid_error(message: str) -> bool:
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     lower = text.lower()
+    if is_token_invalid_error(text):
+        return "image generation failed"
     if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
         return "upstream image connection failed, please retry later"
     return text or "image generation failed"
@@ -367,7 +369,20 @@ def is_image_tool_event(event: dict[str, Any]) -> bool:
         return False
     metadata = message.get("metadata") or {}
     author = message.get("author") or {}
-    return author.get("role") == "tool" and metadata.get("async_task_type") == "image_gen"
+    content = message.get("content") or {}
+    if author.get("role") != "tool":
+        return False
+    if metadata.get("async_task_type") == "image_gen":
+        return True
+    if content.get("content_type") != "multimodal_text":
+        return False
+    return any(
+        isinstance(part, dict) and (
+                part.get("content_type") == "image_asset_pointer"
+                or str(part.get("asset_pointer") or "").startswith(("file-service://", "sediment://"))
+        )
+        for part in content.get("parts") or []
+    )
 
 
 def update_conversation_state(state: ConversationState, payload: str, event: dict[str, Any] | None = None) -> None:
