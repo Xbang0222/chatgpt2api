@@ -572,7 +572,6 @@ def stream_image_outputs(
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
-    is_text_response = last.get("tool_invoked") is False or last.get("turn_use_case") == "text"
     logger.info({
         "event": "image_stream_resolve_start",
         "conversation_id": conversation_id,
@@ -581,7 +580,11 @@ def stream_image_outputs(
         "tool_invoked": last.get("tool_invoked"),
         "turn_use_case": last.get("turn_use_case"),
     })
-    if message and not file_ids and not sediment_ids and (last.get("blocked") or is_text_response):
+    if message and not file_ids and not sediment_ids and last.get("blocked"):
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
+        return
+    should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
+    if message and not file_ids and not sediment_ids and not should_poll_for_image:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
 
