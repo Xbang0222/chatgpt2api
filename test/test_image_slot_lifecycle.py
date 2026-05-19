@@ -175,14 +175,17 @@ class ImageSlotLifecycleTests(unittest.TestCase):
             )
 
     def test_slot_released_on_invalid_token_retry(self) -> None:
-        """Cover the `is_token_invalid_error` -> `remove_invalid_token` -> continue path.
+        """Cover the is_token_invalid_error -> remove_invalid_token -> continue path.
 
-        The first token raises "access token is invalid"; the pool catches it,
-        removes the account (which pops _image_inflight[token]), then the
-        outer while-True loop continues and acquires a fresh token. The
-        finally clause must still call release_image_slot on the original
-        token — but it's a no-op there because the entry was already popped.
-        The second attempt succeeds; its slot must also be released.
+        With auto_remove_invalid_accounts=True (the production config),
+        remove_invalid_token routes through delete_accounts, which pops
+        _image_inflight[token] BEFORE the finally clause runs. The
+        finally then calls release_image_slot on a token already popped
+        — that must be a safe no-op. This test exercises that interaction
+        end-to-end.
+
+        The outer while-True loop then acquires a fresh token; its slot
+        must be released cleanly when the second attempt succeeds.
         """
         self.service.add_accounts(["token-2"])
         self.service.update_account(
@@ -190,18 +193,50 @@ class ImageSlotLifecycleTests(unittest.TestCase):
             {"status": "正常", "quota": 0, "image_quota_unknown": True},
         )
 
-        call_log: list[str] = []
-        self._patch_stream(_stub_stream_invalid_token_then_success(call_log, ["token-1", "token-2"]))
+        with patch.dict(config.data, {"auto_remove_invalid_accounts": True}):
+            call_log: list[str] = []
+            self._patch_stream(_stub_stream_invalid_token_then_success(call_log, ["token-1", "token-2"]))
 
-        outputs = list(stream_image_outputs_with_pool(_request()))
+            outputs = list(stream_image_outputs_with_pool(_request()))
 
         self.assertTrue(any(o.kind == "result" for o in outputs))
         # Two backend calls: one failing (invalid token), one succeeding.
         self.assertEqual(len(call_log), 2)
-        # token-1 was removed entirely by remove_invalid_token; it should
-        # not appear in _image_inflight.
+        # token-1 was deleted entirely by delete_accounts (auto-remove path).
+        self.assertNotIn("token-1", self.service._accounts)
         self.assertNotIn("token-1", self.service._image_inflight)
         # token-2 acquired and released cleanly.
+        self.assertIn("token-2", self.service._accounts)
+        self.assertEqual(self.service._image_inflight.get("token-2", 0), 0)
+
+    def test_slot_released_on_invalid_token_retry_when_auto_remove_disabled(self) -> None:
+        """Same flow as above but auto_remove_invalid_accounts=False (the default).
+
+        Here remove_invalid_token takes the update_account branch: token-1
+        is downgraded to status=异常 but NOT removed from _accounts or from
+        _image_inflight. The finally clause is the sole point that releases
+        the slot on token-1. Validates that the non-delete branch also
+        leaves no leak.
+        """
+        self.service.add_accounts(["token-2"])
+        self.service.update_account(
+            "token-2",
+            {"status": "正常", "quota": 0, "image_quota_unknown": True},
+        )
+
+        with patch.dict(config.data, {"auto_remove_invalid_accounts": False}):
+            call_log: list[str] = []
+            self._patch_stream(_stub_stream_invalid_token_then_success(call_log, ["token-1", "token-2"]))
+
+            outputs = list(stream_image_outputs_with_pool(_request()))
+
+        self.assertTrue(any(o.kind == "result" for o in outputs))
+        self.assertEqual(len(call_log), 2)
+        # token-1 stays in _accounts but is marked 异常.
+        self.assertIn("token-1", self.service._accounts)
+        self.assertEqual(self.service._accounts["token-1"]["status"], "异常")
+        # Inflight is empty for both tokens.
+        self.assertEqual(self.service._image_inflight.get("token-1", 0), 0)
         self.assertEqual(self.service._image_inflight.get("token-2", 0), 0)
 
 
