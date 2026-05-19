@@ -152,17 +152,17 @@ The `except Exception` branch may call `account_service.remove_invalid_token(tok
 
 ## Testing
 
-New test file: `test/test_image_slot_lifecycle.py`
+New test file: `test/test_image_slot_lifecycle.py` (using `unittest.TestCase` for consistency with the rest of `test/`)
 
-Tests (all using `AccountService` with an in-memory storage backend and a stubbed `OpenAIBackendAPI`):
+Tests (using `AccountService` with `JSONStorageBackend` in a `tempfile.TemporaryDirectory`, plus monkeypatching `services.protocol.conversation.OpenAIBackendAPI` and `services.account_service.AccountService.fetch_remote_info` to inject controlled behavior):
 
-1. **`test_slot_released_on_poll_timeout`** — Stub backend to raise `ImagePollTimeoutError` during the streaming loop. Wrap `list(stream_image_outputs_with_pool(request))` in `pytest.raises(ImagePollTimeoutError)`. Assert `service._image_inflight == {}` afterwards. **This is the core regression test.**
+1. **`test_slot_released_on_poll_timeout`** — Stub backend so `stream_image_outputs` raises `ImagePollTimeoutError`. Run `list(stream_image_outputs_with_pool(request))` inside `self.assertRaises(ImagePollTimeoutError)`. Assert `service._image_inflight == {}` afterwards. **This is the core regression test.**
 2. **`test_slot_released_on_success`** — Stub backend to yield a valid `ImageOutput(kind="result", ...)`. Exhaust the generator via `list(...)`, then assert `_image_inflight == {}`.
-3. **`test_slot_released_on_generation_error`** — Stub backend to raise `ImageGenerationError`. Wrap in `pytest.raises`. Assert `_image_inflight == {}`.
-4. **`test_slot_released_on_unexpected_exception`** — Stub backend to raise `RuntimeError("boom")`. Wrap in `pytest.raises`. Assert `_image_inflight == {}`.
-5. **`test_mark_image_success_does_not_change_inflight`** — Manually set `_image_inflight[token] = 3`, call `mark_image_success(token)`, assert it is still 3. Then call `release_image_slot(token)`, assert it drops to 2. This locks in the responsibility split.
+3. **`test_slot_released_on_generation_error`** — Stub backend to raise `ImageGenerationError`. Wrap in `assertRaises`. Assert `_image_inflight == {}`.
+4. **`test_slot_released_on_unexpected_exception`** — Stub backend to raise `RuntimeError("boom")` (which the pool converts via `_image_error_from_upstream`). Wrap in `assertRaises(ImageGenerationError)`. Assert `_image_inflight == {}`.
+5. **`test_mark_image_success_does_not_change_inflight`** — Manually set `service._image_inflight["token-1"] = 3`, call `mark_image_success("token-1")`, assert `_image_inflight["token-1"] == 3`. Then call `release_image_slot("token-1")`, assert it drops to 2. This locks in the responsibility split.
 6. **`test_mark_image_failure_does_not_change_inflight`** — Symmetric to #5 with `mark_image_failure`.
-7. **`test_no_leak_under_repeated_timeouts`** — Fire 50 consecutive `list(stream_image_outputs_with_pool(request))` calls with the timeout stub (each wrapped in `pytest.raises(ImagePollTimeoutError)`). Assert `_image_inflight == {}` at the end. This directly reproduces the user-visible production bug.
+7. **`test_no_leak_under_repeated_timeouts`** — Fire 50 consecutive `list(stream_image_outputs_with_pool(request))` calls with the timeout stub (each wrapped in `assertRaises(ImagePollTimeoutError)`). Assert `_image_inflight == {}` at the end. This directly reproduces the user-visible production bug.
 
 Existing test updates:
 
