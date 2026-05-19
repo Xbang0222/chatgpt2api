@@ -122,3 +122,11 @@ def anthropic_error_response(
         },
         headers=headers,
     )
+
+
+def upstream_status_or_default(exc: Exception, default: int = 502) -> int:
+    """Return exc.status_code for upstream 4xx errors, else the default."""
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and 400 <= status < 500:
+        return status
+    return default

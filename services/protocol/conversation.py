@@ -13,6 +13,11 @@ from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
+from services.protocol.error_response import (
+    _default_error_code,
+    _default_error_type,
+    upstream_status_or_default,
+)
 from utils.helper import IMAGE_MODELS, extract_image_from_message_content
 from utils.log import logger
 
@@ -585,6 +590,14 @@ def stream_image_outputs(
         return
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
     if message and not file_ids and not sediment_ids and not should_poll_for_image:
+        use_case = str(last.get("turn_use_case") or "")
+        if use_case and use_case != "text":
+            logger.warning({
+                "event": "image_stream_unknown_use_case",
+                "turn_use_case": use_case,
+                "tool_invoked": last.get("tool_invoked"),
+                "has_request_images": bool(request.images),
+            })
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
 
@@ -607,6 +620,17 @@ def stream_image_outputs(
 
     if message:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
+
+
+def _image_error_from_upstream(exc: Exception, last_error: str) -> ImageGenerationError:
+    """Build an ImageGenerationError that preserves upstream 4xx status codes."""
+    status = upstream_status_or_default(exc)
+    return ImageGenerationError(
+        image_stream_error_message(last_error),
+        status_code=status,
+        error_type=_default_error_type(status),
+        code=_default_error_code(status),
+    )
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
@@ -659,7 +683,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 if not emitted_for_token and is_token_invalid_error(last_error):
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
-                raise ImageGenerationError(image_stream_error_message(last_error)) from exc
+                raise _image_error_from_upstream(exc, last_error) from exc
 
     if not emitted:
         if not last_error:

@@ -15,7 +15,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
-from services.protocol.error_response import anthropic_error_response, openai_error_response
+from services.protocol.error_response import (
+    anthropic_error_response,
+    openai_error_response,
+    upstream_status_or_default,
+)
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
@@ -153,7 +157,11 @@ def _image_error_response(exc: Exception) -> JSONResponse:
             429,
         )
     if hasattr(exc, "to_openai_error") and hasattr(exc, "status_code"):
-        return JSONResponse(status_code=int(exc.status_code), content=exc.to_openai_error())
+        try:
+            status_code = int(exc.status_code)
+        except (TypeError, ValueError):
+            status_code = upstream_status_or_default(exc)
+        return JSONResponse(status_code=status_code, content=exc.to_openai_error())
     return openai_error_response(message, 502)
 
 
@@ -193,7 +201,7 @@ class LoggedCall:
             raise
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc))
-            return _protocol_error_response(exc, 502, sse)
+            return _protocol_error_response(exc, upstream_status_or_default(exc), sse)
 
         if isinstance(result, dict):
             self.log("调用完成", result)
@@ -210,7 +218,7 @@ class LoggedCall:
             raise
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc))
-            return _protocol_error_response(exc, 502, sse)
+            return _protocol_error_response(exc, upstream_status_or_default(exc), sse)
         if not has_first:
             self.log("流式调用结束")
             return StreamingResponse(sender(()), media_type="text/event-stream")
