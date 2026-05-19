@@ -26,7 +26,7 @@ class AccountCapabilityTests(unittest.TestCase):
             )
         )
 
-    def test_mark_image_result_does_not_consume_unknown_quota(self) -> None:
+    def test_mark_image_success_does_not_consume_unknown_quota(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
             service.add_accounts(["token-1"])
@@ -39,7 +39,7 @@ class AccountCapabilityTests(unittest.TestCase):
                 },
             )
 
-            updated = service.mark_image_result("token-1", success=True)
+            updated = service.mark_image_success("token-1")
 
             self.assertIsNotNone(updated)
             self.assertEqual(updated["quota"], 0)
@@ -78,7 +78,7 @@ class AccountCapabilityTests(unittest.TestCase):
             service.release_image_slot("token-1")
             self.assertEqual(service._image_inflight["token-1"], 2)
 
-    def test_mark_image_success_updates_quota_like_old_mark_image_result(self) -> None:
+    def test_mark_image_success_updates_success_counter_and_quota(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
             service.add_accounts(["token-1"])

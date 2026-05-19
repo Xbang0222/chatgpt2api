@@ -340,41 +340,6 @@ class AccountService:
             return dict(account)
         return None
 
-    def mark_image_result(self, access_token: str, success: bool) -> dict | None:
-        if not access_token:
-            return None
-        self.release_image_slot(access_token)
-        with self._lock:
-            current = self._accounts.get(access_token)
-            if current is None:
-                return None
-            next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            image_quota_unknown = bool(next_item.get("image_quota_unknown"))
-            if success:
-                next_item["success"] = int(next_item.get("success") or 0) + 1
-                if not image_quota_unknown:
-                    next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
-                if not image_quota_unknown and next_item["quota"] == 0:
-                    next_item["status"] = "限流"
-                    next_item["restore_at"] = next_item.get("restore_at") or None
-                elif next_item.get("status") == "限流":
-                    next_item["status"] = "正常"
-            else:
-                next_item["fail"] = int(next_item.get("fail") or 0) + 1
-            account = self._normalize_account(next_item)
-            if account is None:
-                return None
-            if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
-                self._accounts.pop(access_token, None)
-                self._save_accounts()
-                log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
-                return None
-            self._accounts[access_token] = account
-            self._save_accounts()
-            return dict(account)
-        return None
-
     def mark_image_success(self, access_token: str) -> dict | None:
         if not access_token:
             return None
