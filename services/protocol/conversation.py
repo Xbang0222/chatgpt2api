@@ -667,23 +667,27 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     returned_result = returned_result or output.kind == "result"
                     yield output
                 if returned_message or not returned_result:
-                    account_service.mark_image_result(token, False)
+                    account_service.mark_image_failure(token)
                     return
-                account_service.mark_image_result(token, True)
+                account_service.mark_image_success(token)
                 break
             except ImagePollTimeoutError:
+                # Timeout is not an account-level failure; do not update stats.
+                # The slot is still released by the finally clause below.
                 raise
             except ImageGenerationError:
-                account_service.mark_image_result(token, False)
+                account_service.mark_image_failure(token)
                 raise
             except Exception as exc:
-                account_service.mark_image_result(token, False)
+                account_service.mark_image_failure(token)
                 last_error = str(exc)
                 logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
                 if not emitted_for_token and is_token_invalid_error(last_error):
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
                 raise _image_error_from_upstream(exc, last_error) from exc
+            finally:
+                account_service.release_image_slot(token)
 
     if not emitted:
         if not last_error:

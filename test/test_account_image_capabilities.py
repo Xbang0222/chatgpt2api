@@ -26,7 +26,7 @@ class AccountCapabilityTests(unittest.TestCase):
             )
         )
 
-    def test_mark_image_result_does_not_consume_unknown_quota(self) -> None:
+    def test_mark_image_success_does_not_consume_unknown_quota(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
             service.add_accounts(["token-1"])
@@ -39,12 +39,75 @@ class AccountCapabilityTests(unittest.TestCase):
                 },
             )
 
-            updated = service.mark_image_result("token-1", success=True)
+            updated = service.mark_image_success("token-1")
 
             self.assertIsNotNone(updated)
             self.assertEqual(updated["quota"], 0)
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
+
+    def test_mark_image_success_does_not_change_inflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account(
+                "token-1",
+                {"status": "正常", "quota": 5, "image_quota_unknown": False},
+            )
+            service._image_inflight["token-1"] = 3
+
+            service.mark_image_success("token-1")
+
+            self.assertEqual(service._image_inflight["token-1"], 3)
+            service.release_image_slot("token-1")
+            self.assertEqual(service._image_inflight["token-1"], 2)
+
+    def test_mark_image_failure_does_not_change_inflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account(
+                "token-1",
+                {"status": "正常", "quota": 5, "image_quota_unknown": False},
+            )
+            service._image_inflight["token-1"] = 3
+
+            service.mark_image_failure("token-1")
+
+            self.assertEqual(service._image_inflight["token-1"], 3)
+            service.release_image_slot("token-1")
+            self.assertEqual(service._image_inflight["token-1"], 2)
+
+    def test_mark_image_success_updates_success_counter_and_quota(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account(
+                "token-1",
+                {"status": "正常", "quota": 3, "image_quota_unknown": False},
+            )
+
+            updated = service.mark_image_success("token-1")
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated["quota"], 2)
+            self.assertEqual(updated["success"], 1)
+            self.assertEqual(updated["status"], "正常")
+
+    def test_mark_image_failure_increments_fail_counter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account(
+                "token-1",
+                {"status": "正常", "quota": 3, "image_quota_unknown": False},
+            )
+
+            updated = service.mark_image_failure("token-1")
+
+            self.assertIsNotNone(updated)
+            self.assertEqual(updated["fail"], 1)
+            self.assertEqual(updated["quota"], 3)
 
 
 class TokenLogTests(unittest.TestCase):
