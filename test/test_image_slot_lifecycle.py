@@ -78,6 +78,32 @@ def _stub_stream_runtime_error(backend, request, index, total):
     yield  # noqa
 
 
+def _stub_stream_invalid_token_then_success(call_log, valid_tokens):
+    """First call (on the original token) raises an "invalid token" error.
+    Subsequent calls (on a retry token) yield a success result.
+
+    Mutates valid_tokens — the test removes the first token after it's flagged
+    invalid, mimicking delete_accounts side effects via remove_invalid_token.
+    """
+    def _factory(backend, request, index, total):
+        attempt = len(call_log)
+        token = backend.access_token
+        call_log.append(token)
+        if attempt == 0:
+            # is_token_invalid_error matches on "token_invalidated", "token_revoked",
+            # or "authentication token has been invalidated" — use one verbatim.
+            raise RuntimeError("authentication token has been invalidated")
+        yield ImageOutput(
+            kind="result",
+            model=request.model,
+            index=index,
+            total=total,
+            data=[{"b64_json": "ZmFrZQ=="}],
+            created=1234567890,
+        )
+    return _factory
+
+
 class ImageSlotLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -110,36 +136,73 @@ class ImageSlotLifecycleTests(unittest.TestCase):
         self._patch_stream(_stub_stream_timeout)
         with self.assertRaises(ImagePollTimeoutError):
             list(stream_image_outputs_with_pool(_request()))
-        self.assertEqual(self.service._image_inflight, {})
+        self.assertEqual(self.service._image_inflight.get("token-1", 0), 0)
 
     def test_slot_released_on_success(self) -> None:
         self._patch_stream(_stub_stream_success)
         outputs = list(stream_image_outputs_with_pool(_request()))
         self.assertTrue(any(o.kind == "result" for o in outputs))
-        self.assertEqual(self.service._image_inflight, {})
+        self.assertEqual(self.service._image_inflight.get("token-1", 0), 0)
 
     def test_slot_released_on_generation_error(self) -> None:
         self._patch_stream(_stub_stream_generation_error)
         with self.assertRaises(ImageGenerationError):
             list(stream_image_outputs_with_pool(_request()))
-        self.assertEqual(self.service._image_inflight, {})
+        self.assertEqual(self.service._image_inflight.get("token-1", 0), 0)
 
     def test_slot_released_on_unexpected_exception(self) -> None:
         self._patch_stream(_stub_stream_runtime_error)
         with self.assertRaises(ImageGenerationError):
             list(stream_image_outputs_with_pool(_request()))
-        self.assertEqual(self.service._image_inflight, {})
+        self.assertEqual(self.service._image_inflight.get("token-1", 0), 0)
 
     def test_no_leak_under_repeated_timeouts(self) -> None:
         # 50 iterations directly reproduces the production accumulation pattern.
         # On the buggy code path every iteration leaks one slot; the test bumps
         # image_account_concurrency in setUp to keep get_available_access_token
         # from blocking on the leaked-slot deadlock so the assertion can fire.
+        # Asserting after EVERY iteration (not just the final one) protects
+        # against future regressions that might let the count grow then shrink
+        # to zero by coincidence at the end.
         self._patch_stream(_stub_stream_timeout)
-        for _ in range(50):
+        for iteration in range(50):
             with self.assertRaises(ImagePollTimeoutError):
                 list(stream_image_outputs_with_pool(_request()))
-        self.assertEqual(self.service._image_inflight, {})
+            self.assertEqual(
+                self.service._image_inflight.get("token-1", 0),
+                0,
+                f"slot leaked after iteration {iteration + 1}",
+            )
+
+    def test_slot_released_on_invalid_token_retry(self) -> None:
+        """Cover the `is_token_invalid_error` -> `remove_invalid_token` -> continue path.
+
+        The first token raises "access token is invalid"; the pool catches it,
+        removes the account (which pops _image_inflight[token]), then the
+        outer while-True loop continues and acquires a fresh token. The
+        finally clause must still call release_image_slot on the original
+        token — but it's a no-op there because the entry was already popped.
+        The second attempt succeeds; its slot must also be released.
+        """
+        self.service.add_accounts(["token-2"])
+        self.service.update_account(
+            "token-2",
+            {"status": "正常", "quota": 0, "image_quota_unknown": True},
+        )
+
+        call_log: list[str] = []
+        self._patch_stream(_stub_stream_invalid_token_then_success(call_log, ["token-1", "token-2"]))
+
+        outputs = list(stream_image_outputs_with_pool(_request()))
+
+        self.assertTrue(any(o.kind == "result" for o in outputs))
+        # Two backend calls: one failing (invalid token), one succeeding.
+        self.assertEqual(len(call_log), 2)
+        # token-1 was removed entirely by remove_invalid_token; it should
+        # not appear in _image_inflight.
+        self.assertNotIn("token-1", self.service._image_inflight)
+        # token-2 acquired and released cleanly.
+        self.assertEqual(self.service._image_inflight.get("token-2", 0), 0)
 
 
 if __name__ == "__main__":
