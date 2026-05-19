@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
+
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
-from services.log_service import LOG_TYPE_CALL, log_service
+from services.log_service import LOG_TYPE_CALL, _request_excerpt, log_service
+from services.openai_backend_api import ImagePollTimeoutError
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from services.protocol.conversation import ImageGenerationError
+from services.protocol.error_response import error_message_from_detail
+from utils.helper import UpstreamHTTPError
+from utils.log import logger
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -61,6 +70,37 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
+class ImageQueueFullError(Exception):
+    DEFAULT_RETRY_AFTER_SECONDS = 5
+
+    def __init__(self, retry_after: int = DEFAULT_RETRY_AFTER_SECONDS) -> None:
+        self.retry_after = retry_after
+        super().__init__("image worker pool is full")
+
+
+def _safe_error_message(exc: Exception) -> str:
+    """Extract a client-safe message from an upstream exception.
+
+    UpstreamHTTPError.__str__ embeds the upstream URL path in the prefix,
+    which is internal routing detail we don't want leaking through task["error"].
+    """
+    if isinstance(exc, UpstreamHTTPError):
+        body = getattr(exc, "body", "") or ""
+        if body:
+            try:
+                parsed = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                parsed = None
+            if parsed is not None:
+                message = error_message_from_detail(parsed)
+                if message:
+                    return message
+        status = getattr(exc, "status_code", 0) or 0
+        return f"upstream returned HTTP {status}" if status else "upstream request failed"
+    text = str(exc).strip()
+    return text or "image task failed"
+
+
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     item = {
         "id": task.get("id"),
@@ -93,6 +133,11 @@ class ImageTaskService:
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._semaphore: threading.BoundedSemaphore | None = None
+        self._max_workers_effective = 0
+        self._inflight_count = 0
+        self._rejection_timestamps: list[float] = []
+        self._oai_callbacks: dict[str, Callable[[dict[str, Any]], None]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
@@ -100,6 +145,94 @@ class ImageTaskService:
             changed = self._cleanup_locked() or changed
             if changed:
                 self._save_locked()
+
+    def configure_max_workers(self, max_workers: int) -> None:
+        value = max(1, int(max_workers))
+        with self._lock:
+            if self._semaphore is not None:
+                raise RuntimeError("image worker pool is already configured")
+            self._semaphore = threading.BoundedSemaphore(value)
+            self._max_workers_effective = value
+
+    def acquire_slot(self) -> None:
+        semaphore = self._semaphore
+        if semaphore is None:
+            raise RuntimeError("image worker pool is not configured")
+        if not semaphore.acquire(blocking=False):
+            with self._lock:
+                self._rejection_timestamps.append(time.time())
+                self._trim_old_rejections_locked()
+                current_inflight = self._inflight_count
+            logger.warning({"event": "image_queue_full_reject", "current_inflight": current_inflight})
+            raise ImageQueueFullError()
+        with self._lock:
+            self._inflight_count += 1
+
+    def release_slot(self) -> None:
+        semaphore = self._semaphore
+        if semaphore is not None:
+            semaphore.release()
+        with self._lock:
+            self._inflight_count -= 1
+
+    def wait_for_inflight(self, timeout: float) -> None:
+        """Best-effort wait for in-flight OAI workers before shutdown."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and self.current_inflight > 0:
+            time.sleep(0.05)
+
+    async def submit_and_wait_async(
+        self,
+        identity: dict[str, object],
+        *,
+        mode: str,
+        payload: dict[str, Any],
+        timeout: float,
+    ) -> dict[str, Any]:
+        self.acquire_slot()
+
+        task_id = f"oai-{uuid.uuid4().hex[:16]}"
+        callback_registered = False
+        try:
+            loop = asyncio.get_running_loop()
+            event = asyncio.Event()
+            result_container: dict[str, dict[str, Any]] = {}
+
+            def on_complete(task: dict[str, Any]) -> None:
+                result_container["task"] = task
+                try:
+                    loop.call_soon_threadsafe(event.set)
+                except RuntimeError:
+                    pass
+
+            with self._lock:
+                self._oai_callbacks[task_id] = on_complete
+                callback_registered = True
+
+            thread = threading.Thread(
+                target=self._run_oai_task,
+                args=(task_id, mode, dict(payload)),
+                daemon=True,
+                name=f"image-oai-{task_id[:12]}",
+            )
+            logger.info({"event": "image_task_submitted", "task_id": task_id, "mode": mode})
+            thread.start()
+        except Exception:
+            if callback_registered:
+                with self._lock:
+                    self._oai_callbacks.pop(task_id, None)
+            self.release_slot()
+            raise
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise ImagePollTimeoutError(f"等待图片生成超时（{timeout}s），后台任务仍在执行") from exc
+
+        task = result_container.get("task")
+        if task is None:
+            raise RuntimeError("image task completed without result")
+        return task
 
     def submit_generation(
         self,
@@ -260,6 +393,97 @@ class ImageTaskService:
                 error=error_message,
             )
 
+    def _run_oai_task(
+        self,
+        task_id: str,
+        mode: str,
+        payload: dict[str, Any],
+    ) -> None:
+        started = time.time()
+        task_dict: dict[str, Any]
+        try:
+            handler = self.edit_handler if mode == "edit" else self.generation_handler
+            result = handler(payload)
+            if not isinstance(result, dict):
+                raise RuntimeError("internal error: handler returned a streaming iterator")
+
+            data = result.get("data")
+            message = _clean(result.get("message"))
+            if not isinstance(data, list) or not data:
+                if message:
+                    raise RuntimeError(message)
+                raise RuntimeError("号池中没有可用账号或所有账号均被限流，请检查号池状态（账号额度、是否被封禁、是否到达生图上限）")
+
+            task_dict = {
+                "status": TASK_STATUS_SUCCESS,
+                "data": data,
+                "created": int(result.get("created") or time.time()),
+            }
+        except ImagePollTimeoutError as exc:
+            task_dict = self._make_error_task_dict(str(exc), status_code=504)
+        except ImageGenerationError as exc:
+            status_code = int(getattr(exc, "status_code", 502) or 502)
+            error_type = getattr(exc, "error_type", None)
+            code = getattr(exc, "code", None)
+            if "no available image quota" in str(exc).lower():
+                status_code = 429
+                error_type = "insufficient_quota"
+                code = "insufficient_quota"
+            task_dict = self._make_error_task_dict(
+                str(exc),
+                status_code=status_code,
+                error_type=error_type,
+                code=code,
+                param=getattr(exc, "param", None),
+            )
+        except HTTPException as exc:
+            task_dict = self._make_error_task_dict(
+                error_message_from_detail(exc.detail),
+                status_code=exc.status_code,
+            )
+        except Exception as exc:
+            task_dict = self._make_error_task_dict(_safe_error_message(exc), status_code=502)
+        finally:
+            self.release_slot()
+
+        logger.info({
+            "event": "image_task_completed",
+            "task_id": task_id,
+            "duration_ms": int((time.time() - started) * 1000),
+            "status": task_dict.get("status"),
+        })
+        with self._lock:
+            callback = self._oai_callbacks.pop(task_id, None)
+        if callback is not None:
+            try:
+                callback(task_dict)
+            except Exception as exc:
+                logger.warning({"event": "oai_callback_error", "error": str(exc)})
+
+    def _make_error_task_dict(
+        self,
+        error: str,
+        *,
+        status_code: int,
+        error_type: str | None = None,
+        code: str | None = None,
+        param: str | None = None,
+    ) -> dict[str, Any]:
+        task: dict[str, Any] = {
+            "status": TASK_STATUS_ERROR,
+            "error": error or "image task failed",
+            "status_code": status_code,
+            "data": [],
+            "created": int(time.time()),
+        }
+        if error_type:
+            task["error_type"] = error_type
+        if code:
+            task["code"] = code
+        if param:
+            task["param"] = param
+        return task
+
     def _log_call(
         self,
         identity: dict[str, object],
@@ -286,8 +510,9 @@ class ImageTaskService:
             "duration_ms": int((time.time() - started) * 1000),
             "status": status,
         }
-        if request_preview:
-            detail["request_text"] = request_preview
+        excerpt = _request_excerpt(request_preview)
+        if excerpt:
+            detail["request_text"] = excerpt
         if error:
             detail["error"] = error
         if urls:
@@ -376,6 +601,26 @@ class ImageTaskService:
         for key in removed_keys:
             self._tasks.pop(key, None)
         return bool(removed_keys)
+
+    def _trim_old_rejections_locked(self) -> None:
+        cutoff = time.time() - 86400
+        self._rejection_timestamps = [item for item in self._rejection_timestamps if item >= cutoff]
+
+    @property
+    def current_inflight(self) -> int:
+        with self._lock:
+            return self._inflight_count
+
+    @property
+    def rejection_count_24h(self) -> int:
+        with self._lock:
+            self._trim_old_rejections_locked()
+            return len(self._rejection_timestamps)
+
+    @property
+    def max_workers_effective(self) -> int:
+        with self._lock:
+            return self._max_workers_effective
 
 
 image_task_service = ImageTaskService(DATA_DIR / "image_tasks.json")

@@ -15,17 +15,24 @@ PNG_BYTES = b"\x89PNG\r\n\x1a\n"
 DATA_IMAGE_URL = f"data:image/png;base64,{base64.b64encode(PNG_BYTES).decode('ascii')}"
 
 
+class FakeImageTaskService:
+    def __init__(self, calls: list[dict[str, object]]):
+        self.calls = calls
+
+    async def submit_and_wait_async(self, _identity, *, mode, payload, timeout):
+        self.calls.append(payload)
+        return {"status": "success", "created": 1, "data": [{"b64_json": base64.b64encode(b"out").decode("ascii")}]}
+
+
 class ImagesEditsApiTests(unittest.TestCase):
     def setUp(self):
         self.handle_calls = []
-
-        def fake_handle(payload):
-            self.handle_calls.append(payload)
-            return {"created": 1, "data": [{"b64_json": base64.b64encode(b"out").decode("ascii")}]}
-
-        self.handler_patcher = mock.patch.object(ai_module.openai_v1_image_edit, "handle", fake_handle)
-        self.handler_patcher.start()
-        self.addCleanup(self.handler_patcher.stop)
+        self.service_patcher = mock.patch.object(ai_module, "image_task_service", FakeImageTaskService(self.handle_calls))
+        self.filter_patcher = mock.patch.object(ai_module, "filter_or_log", mock.AsyncMock())
+        self.service_patcher.start()
+        self.filter_patcher.start()
+        self.addCleanup(self.service_patcher.stop)
+        self.addCleanup(self.filter_patcher.stop)
         app = FastAPI()
         app.include_router(ai_module.create_router())
         self.client = TestClient(app)

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 
-from services.image_task_service import ImageTaskService
+from services.image_task_service import ImageQueueFullError, ImageTaskService
+from services.openai_backend_api import ImagePollTimeoutError
+from services.protocol.conversation import ImageGenerationError
 
 
 OWNER = {"id": "owner-1", "name": "Owner", "role": "admin"}
@@ -23,6 +26,15 @@ def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_i
             return last
         time.sleep(0.02)
     raise AssertionError(f"task {task_id} did not reach {status}, last={last}")
+
+
+def wait_for_inflight(service: ImageTaskService, value: int, timeout: float = 2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if service.current_inflight == value:
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"inflight did not reach {value}, current={service.current_inflight}")
 
 
 class ImageTaskServiceTests(unittest.TestCase):
@@ -143,6 +155,98 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+
+    def test_worker_slots_reject_when_full(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            service.configure_max_workers(1)
+            service.acquire_slot()
+            try:
+                with self.assertRaises(ImageQueueFullError) as ctx:
+                    service.acquire_slot()
+
+                self.assertEqual(ctx.exception.retry_after, 5)
+                self.assertEqual(service.current_inflight, 1)
+                self.assertEqual(service.rejection_count_24h, 1)
+            finally:
+                service.release_slot()
+
+            self.assertEqual(service.current_inflight, 0)
+
+
+class ImageTaskServiceOpenAIWorkerTests(unittest.IsolatedAsyncioTestCase):
+    def make_service(self, path: Path, handler=None) -> ImageTaskService:
+        return ImageTaskService(
+            path,
+            generation_handler=handler or (lambda _payload: {"created": 123, "data": [{"url": "http://example.test/image.png"}]}),
+            edit_handler=handler or (lambda _payload: {"created": 123, "data": [{"url": "http://example.test/edit.png"}]}),
+            retention_days_getter=lambda: 30,
+        )
+
+    async def test_submit_and_wait_async_success_releases_slot(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            service.configure_max_workers(1)
+
+            task = await service.submit_and_wait_async(
+                OWNER,
+                mode="generate",
+                payload={"prompt": "cat", "model": "gpt-image-2"},
+                timeout=1.0,
+            )
+
+            self.assertEqual(task["status"], "success")
+            self.assertEqual(task["created"], 123)
+            self.assertEqual(service.current_inflight, 0)
+
+    async def test_submit_and_wait_async_error_preserves_status_and_releases_slot(self):
+        def handler(_payload):
+            raise ImageGenerationError(
+                "rate limited",
+                status_code=429,
+                error_type="rate_limit_error",
+                code="rate_limit_exceeded",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.configure_max_workers(1)
+
+            task = await service.submit_and_wait_async(
+                OWNER,
+                mode="generate",
+                payload={"prompt": "cat", "model": "gpt-image-2"},
+                timeout=1.0,
+            )
+
+            self.assertEqual(task["status"], "error")
+            self.assertEqual(task["status_code"], 429)
+            self.assertEqual(task["error_type"], "rate_limit_error")
+            self.assertEqual(task["code"], "rate_limit_exceeded")
+            self.assertEqual(service.current_inflight, 0)
+
+    async def test_submit_and_wait_async_timeout_keeps_slot_until_worker_finishes(self):
+        gate = threading.Event()
+
+        def handler(_payload):
+            gate.wait(1.0)
+            return {"created": 123, "data": [{"url": "http://example.test/image.png"}]}
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.configure_max_workers(1)
+
+            with self.assertRaises(ImagePollTimeoutError):
+                await service.submit_and_wait_async(
+                    OWNER,
+                    mode="generate",
+                    payload={"prompt": "cat", "model": "gpt-image-2"},
+                    timeout=0.02,
+                )
+
+            self.assertEqual(service.current_inflight, 1)
+            gate.set()
+            wait_for_inflight(service, 0)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,20 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     return max(minimum, normalized)
 
 
+def _normalize_optional_positive_int(value: object, *, name: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} 必须为空或正整数") from exc
+    if normalized < 1:
+        raise ValueError(f"{name} 必须为空或正整数")
+    return normalized
+
+
 def _normalize_backup_include(value: object) -> dict[str, bool]:
     source = value if isinstance(value, dict) else {}
     normalized = dict(DEFAULT_BACKUP_INCLUDE)
@@ -181,6 +195,8 @@ class ConfigStore:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
         self._storage_backend: StorageBackend | None = None
+        self._max_image_workers_effective = 0
+        self._starlette_pool_size_effective = 0
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
                 "❌ auth-key 未设置！\n"
@@ -249,6 +265,32 @@ class ConfigStore:
             return max(1, int(self.data.get("image_account_concurrency", 3)))
         except (TypeError, ValueError):
             return 3
+
+    @property
+    def max_image_workers(self) -> int | None:
+        try:
+            return _normalize_optional_positive_int(self.data.get("max_image_workers"), name="max_image_workers")
+        except ValueError:
+            return None
+
+    @property
+    def starlette_pool_size(self) -> int | None:
+        try:
+            value = _normalize_optional_positive_int(self.data.get("starlette_pool_size"), name="starlette_pool_size")
+        except ValueError:
+            return None
+        return max(20, value) if value is not None else None
+
+    def set_runtime_effective(
+        self,
+        *,
+        max_image_workers: int | None = None,
+        starlette_pool_size: int | None = None,
+    ) -> None:
+        if max_image_workers is not None:
+            self._max_image_workers_effective = max(0, int(max_image_workers))
+        if starlette_pool_size is not None:
+            self._starlette_pool_size_effective = max(0, int(starlette_pool_size))
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:
@@ -336,6 +378,10 @@ class ConfigStore:
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["max_image_workers"] = self.max_image_workers
+        data["max_image_workers_effective"] = self._max_image_workers_effective
+        data["starlette_pool_size"] = self.starlette_pool_size
+        data["starlette_pool_size_effective"] = self._starlette_pool_size_effective
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels
@@ -358,6 +404,18 @@ class ConfigStore:
         if "image_storage" in next_data:
             next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
             _validate_image_storage_settings(next_data["image_storage"])
+        if "max_image_workers" in next_data:
+            next_data["max_image_workers"] = _normalize_optional_positive_int(
+                next_data.get("max_image_workers"),
+                name="max_image_workers",
+            )
+        if "starlette_pool_size" in next_data:
+            next_data["starlette_pool_size"] = _normalize_optional_positive_int(
+                next_data.get("starlette_pool_size"),
+                name="starlette_pool_size",
+            )
+        next_data.pop("max_image_workers_effective", None)
+        next_data.pop("starlette_pool_size_effective", None)
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()

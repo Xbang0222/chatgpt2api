@@ -108,6 +108,24 @@ environment:
 - 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 导入
 - 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
 
+## 性能调优
+
+`/v1/images/generations` 和 `/v1/images/edits` 使用独立图片 worker 池执行长轮询任务，避免大量生图请求占满 FastAPI 的共享线程池。图片 worker 满载时接口会快速返回 `503`，并携带 `Retry-After: 5`，客户端可稍后重试；短接口如 `/version`、`/api/logs` 不会被生图长轮询拖住。
+
+可在 `config.json` 或设置页调整：
+
+```json
+{
+  "max_image_workers": null,
+  "starlette_pool_size": null
+}
+```
+
+- `max_image_workers`: 图片 worker 上限。`null` 表示自动，按账号数、`image_account_concurrency` 和内存预算计算，最大 32。
+- `starlette_pool_size`: FastAPI 共享线程池上限。`null` 表示默认 100，最小有效值 20。
+- 上述两个配置保存后需要重启服务才会生效；`image_poll_timeout_secs` 对新请求立即生效。
+- 可通过 `GET /api/system/info` 查看当前有效值、正在运行的图片 worker 数和 24 小时内过载拒绝次数。
+
 ### 实验性 / 规划中
 
 - `/v1/complete` 文本补全与流式输出已实现，但仍在测试，目前会出现对话重复的问题，请谨慎测试使用

@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
+import anyio.to_thread
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
+from services.account_service import account_service
 from services.backup_service import BackupError, backup_service
 from services.config import config
 from services.image_service import delete_images, download_images_zip, get_image_download_response, get_image_response, get_thumbnail_response, list_images
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
+from services.image_task_service import image_task_service
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 
@@ -66,6 +69,38 @@ def create_router(app_version: str) -> APIRouter:
     async def get_settings(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"config": config.get()}
+
+    @router.get("/api/system/info")
+    async def get_system_info(request: Request, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        starlette_pool_effective = int(getattr(request.app.state, "starlette_pool_size_effective", 0) or 0)
+
+        def snapshot():
+            return {
+                "max_workers_effective": image_task_service.max_workers_effective,
+                "current_inflight": image_task_service.current_inflight,
+                "rejection_count_24h": image_task_service.rejection_count_24h,
+                "total_tokens": len(account_service.list_tokens()),
+            }
+
+        snap = await run_in_threadpool(snapshot)
+        return {
+            "image_workers": {
+                "configured": config.max_image_workers,
+                "effective": snap["max_workers_effective"],
+                "current_inflight": snap["current_inflight"],
+                "queue_full_rejections_24h": snap["rejection_count_24h"],
+            },
+            "starlette_pool": {
+                "configured": config.starlette_pool_size,
+                "effective": starlette_pool_effective,
+                "current_total_tokens": anyio.to_thread.current_default_thread_limiter().total_tokens,
+            },
+            "accounts": {
+                "total": snap["total_tokens"],
+                "per_account_concurrency": config.image_account_concurrency,
+            },
+        }
 
     @router.post("/api/settings")
     async def save_settings(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):

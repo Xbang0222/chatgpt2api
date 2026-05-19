@@ -87,6 +87,10 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_retention_days: Number(config.image_retention_days || 30),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
+    max_image_workers: config.max_image_workers == null ? "" : String(config.max_image_workers),
+    max_image_workers_effective: Number(config.max_image_workers_effective || 0),
+    starlette_pool_size: config.starlette_pool_size == null ? "" : String(config.starlette_pool_size),
+    starlette_pool_size_effective: Number(config.starlette_pool_size_effective || 0),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
@@ -135,6 +139,18 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       },
     },
   };
+}
+
+function optionalPositiveInt(value: unknown, minimum = 1): number | string | null {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) {
+    return text;
+  }
+  return Math.max(minimum, Math.trunc(parsed));
 }
 
 function normalizeFiles(items: CPARemoteFile[]) {
@@ -204,6 +220,8 @@ type SettingsStore = {
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
+  setMaxImageWorkers: (value: string) => void;
+  setStarlettePoolSize: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
@@ -340,6 +358,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
+        max_image_workers: optionalPositiveInt(config.max_image_workers),
+        starlette_pool_size: optionalPositiveInt(config.starlette_pool_size, 20),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
@@ -411,6 +431,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageAccountConcurrency: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value } } : {});
+  },
+
+  setMaxImageWorkers: (value) => {
+    set((state) => state.config ? { config: { ...state.config, max_image_workers: value } } : {});
+  },
+
+  setStarlettePoolSize: (value) => {
+    set((state) => state.config ? { config: { ...state.config, starlette_pool_size: value } } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

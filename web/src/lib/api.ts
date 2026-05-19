@@ -87,6 +87,10 @@ export type SettingsConfig = {
   image_retention_days?: number | string;
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
+  max_image_workers?: number | string | null;
+  max_image_workers_effective?: number;
+  starlette_pool_size?: number | string | null;
+  starlette_pool_size_effective?: number;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
@@ -94,6 +98,24 @@ export type SettingsConfig = {
   backup_state?: BackupState;
   image_storage?: ImageStorageSettings;
   [key: string]: unknown;
+};
+
+export type SystemInfo = {
+  image_workers: {
+    configured: number | null;
+    effective: number;
+    current_inflight: number;
+    queue_full_rejections_24h: number;
+  };
+  starlette_pool: {
+    configured: number | null;
+    effective: number;
+    current_total_tokens: number;
+  };
+  accounts: {
+    total: number;
+    per_account_concurrency: number;
+  };
 };
 
 export type ImageStorageMode = "local" | "webdav" | "both";
@@ -450,6 +472,10 @@ export async function fetchImageTasks(ids: string[]) {
 
 export async function fetchSettingsConfig() {
   return httpRequest<{ config: SettingsConfig }>("/api/settings");
+}
+
+export async function fetchSystemInfo() {
+  return httpRequest<SystemInfo>("/api/system/info");
 }
 
 export async function updateSettingsConfig(settings: SettingsConfig) {
