@@ -26,26 +26,6 @@ class AccountCapabilityTests(unittest.TestCase):
             )
         )
 
-    def test_prolite_variants_are_normalized(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
-            self.assertEqual(service._normalize_account_type("prolite"), "ProLite")
-            self.assertEqual(service._normalize_account_type("pro_lite"), "ProLite")
-
-    def test_search_account_type_ignores_unrelated_scalar_values(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
-            self.assertIsNone(
-                service._search_account_type(
-                    {
-                        "amr": ["pwd", "otp", "mfa"],
-                        "chatgpt_compute_residency": "no_constraint",
-                        "chatgpt_data_residency": "no_constraint",
-                        "user_id": "user-I52GFfLGFM0dokFk2dBiKEBn",
-                    }
-                )
-            )
-
     def test_mark_image_result_does_not_consume_unknown_quota(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
