@@ -22,6 +22,13 @@ def is_text_response_request(body: dict[str, Any]) -> bool:
     return not has_response_image_generation_tool(body)
 
 
+def response_image_tool(body: dict[str, Any]) -> dict[str, object]:
+    for tool in body.get("tools") or []:
+        if isinstance(tool, dict) and tool.get("type") == "image_generation":
+            return tool
+    return {}
+
+
 def extract_response_image(input_value: object) -> tuple[bytes, str] | None:
     if isinstance(input_value, dict):
         images = extract_image_from_message_content(input_value.get("content"))
@@ -199,10 +206,12 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         images = encode_images([(image_data, "image.png", mime_type)])
     else:
         images = None
+    tool = response_image_tool(body)
     image_outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
-        size=None if images else "1:1",
+        size=tool.get("size"),
+        quality=str(tool.get("quality") or "auto"),
         response_format="b64_json",
         images=images,
     ))

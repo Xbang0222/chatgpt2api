@@ -275,12 +275,11 @@ export function ImageResults({
                             className={cn(
                               "break-inside-avoid overflow-hidden rounded-xl border border-rose-200 bg-rose-50 sm:rounded-none",
                               "aspect-square",
-                              turn.size === "1:1" && "sm:aspect-square",
-                              turn.size === "16:9" && "sm:aspect-video",
-                              turn.size === "9:16" && "sm:aspect-[9/16]",
-                              turn.size === "4:3" && "sm:aspect-[4/3]",
-                              turn.size === "3:4" && "sm:aspect-[3/4]",
-                              !["1:1", "16:9", "9:16", "4:3", "3:4"].includes(turn.size) && "sm:aspect-square",
+                              turn.ratio === "1:1" && "sm:aspect-square",
+                              turn.ratio === "16:9" && "sm:aspect-video",
+                              turn.ratio === "9:16" && "sm:aspect-[9/16]",
+                              turn.ratio === "4:3" && "sm:aspect-[4/3]",
+                              turn.ratio === "3:4" && "sm:aspect-[3/4]",
                             )}
                           >
                             <div className="flex h-full min-h-16 flex-col items-center justify-center gap-1.5 px-2 py-2 text-center text-[11px] leading-4 text-rose-600 sm:gap-3 sm:px-6 sm:py-8 sm:text-sm sm:leading-6">
@@ -302,12 +301,11 @@ export function ImageResults({
                           key={image.id}
                           className={cn(
                             "break-inside-avoid overflow-hidden rounded-xl border border-stone-200/80 bg-stone-100/80 sm:rounded-none",
-                            turn.size === "1:1" && "aspect-square",
-                            turn.size === "16:9" && "aspect-video",
-                            turn.size === "9:16" && "aspect-[9/16]",
-                            turn.size === "4:3" && "aspect-[4/3]",
-                            turn.size === "3:4" && "aspect-[3/4]",
-                            !["1:1", "16:9", "9:16", "4:3", "3:4"].includes(turn.size) && "aspect-square",
+                            turn.ratio === "1:1" && "aspect-square",
+                            turn.ratio === "16:9" && "aspect-video",
+                            turn.ratio === "9:16" && "aspect-[9/16]",
+                            turn.ratio === "4:3" && "aspect-[4/3]",
+                            turn.ratio === "3:4" && "aspect-[3/4]",
                           )}
                         >
                           <div className="flex h-full flex-col items-center justify-center gap-1.5 px-2 py-3 text-center text-stone-500 sm:gap-3 sm:px-6 sm:py-8">

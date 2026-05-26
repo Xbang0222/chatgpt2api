@@ -151,6 +151,25 @@ function maskToken(token?: string) {
   return `${token.slice(0, 16)}...${token.slice(-8)}`;
 }
 
+function renderPrivacyEmail(email?: string | null) {
+  const value = String(email || "").trim();
+  if (!value) {
+    return <span>—</span>;
+  }
+  const atIndex = value.indexOf("@");
+  if (atIndex < 0) {
+    return <span className="transition duration-150 blur-sm hover:blur-none">{value}</span>;
+  }
+  const localPart = value.slice(0, atIndex + 1);
+  const domain = value.slice(atIndex + 1);
+  return (
+    <span className="group inline-flex max-w-full items-center">
+      <span className="truncate">{localPart}</span>
+      <span className="truncate transition duration-150 blur-sm group-hover:blur-none">{domain}</span>
+    </span>
+  );
+}
+
 function downloadBlob(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -680,8 +699,11 @@ function AccountsPageContent() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
-                            <span className="font-medium tracking-tight text-stone-700">
-                              {maskToken(account.access_token)}
+                            <span
+                              className="max-w-[240px] truncate font-medium tracking-tight text-stone-700 transition duration-150 blur-sm hover:blur-none"
+                              title={account.access_token}
+                            >
+                              {account.access_token}
                             </span>
                             <button
                               type="button"
@@ -710,7 +732,7 @@ function AccountsPageContent() {
                           </Badge>
                         </td>
                         <td className="px-4 py-3">
-                          <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
+                          <div className="text-xs leading-5 text-stone-500">{renderPrivacyEmail(account.email)}</div>
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="info" className="rounded-md">

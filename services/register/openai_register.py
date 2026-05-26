@@ -578,15 +578,26 @@ class PlatformRegistrar:
             h.update(_make_trace_headers())
             return h
 
-        resp, error = request_with_local_retry(
-            login_session, "get",
-            f"{auth_base}/api/accounts/authorize?{urlencode(params)}",
-            headers=_login_nav_headers(f"{platform_base}/"),
-            allow_redirects=True, verify=False
-        )
-        if resp is None:
-            raise RuntimeError(error or "platform_login_authorize_failed")
-        step(index, "登录 authorize 完成")
+        def _clear_login_auth_cookies() -> None:
+            for cookie in list(login_session.cookies):
+                if "auth.openai.com" in str(cookie.domain):
+                    login_session.cookies.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
+            login_session.cookies.set("oai-did", login_device_id, domain=".auth.openai.com")
+            login_session.cookies.set("oai-did", login_device_id, domain="auth.openai.com")
+
+        def _do_login_authorize(label: str) -> None:
+            nonlocal resp, error
+            resp, error = request_with_local_retry(
+                login_session, "get",
+                f"{auth_base}/api/accounts/authorize?{urlencode(params)}",
+                headers=_login_nav_headers(f"{platform_base}/"),
+                allow_redirects=True, verify=False
+            )
+            if resp is None:
+                raise RuntimeError(error or f"platform_login_authorize_{label}_failed")
+            if resp.status_code not in (200, 302):
+                raise RuntimeError(error or f"platform_login_authorize_{label}_http_{getattr(resp, 'status_code', 'unknown')}")
+            step(index, "登录 authorize 完成" if label == "initial" else f"登录 authorize 重试完成[{label}]")
 
         # 提交邮箱（原样，不带 state）
         def _do_authorize_continue():
@@ -601,57 +612,68 @@ class PlatformRegistrar:
                 verify=False
             )
 
-        step(index, "开始提交邮箱")
-        resp, error = _do_authorize_continue()
-        if resp is not None and resp.status_code == 409:
-            step(index, "邮箱提交 invalid_state，重新 authorize 后重试")
-            # 再次清除 cookie 并重新 authorize
-            for cookie in list(login_session.cookies):
-                if 'auth.openai.com' in cookie.domain:
-                    login_session.cookies.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
-            login_session.cookies.set("oai-did", login_device_id, domain=".auth.openai.com")
-            login_session.cookies.set("oai-did", login_device_id, domain="auth.openai.com")
-            resp, error = request_with_local_retry(
-                login_session, "get",
-                f"{auth_base}/api/accounts/authorize?{urlencode(params)}",
-                headers=_login_nav_headers(f"{platform_base}/"),
-                allow_redirects=True, verify=False
-            )
-            if resp is None:
-                raise RuntimeError(error or "platform_login_authorize_retry_failed")
-            resp, error = _do_authorize_continue()
+        def _submit_email_with_reauth() -> None:
+            nonlocal resp, error
+            step(index, "开始提交邮箱")
+            for attempt in range(3):
+                if attempt:
+                    step(index, f"邮箱提交 409/状态失效，清理 cookie 后重新 authorize 重试({attempt + 1}/3)", "yellow")
+                    _clear_login_auth_cookies()
+                    _do_login_authorize(f"email-{attempt + 1}")
+                resp, error = _do_authorize_continue()
+                if resp is not None and resp.status_code == 409:
+                    continue
+                break
+            if resp is None or resp.status_code != 200:
+                data = _response_json(resp) if resp is not None else {}
+                detail = json.dumps(data, ensure_ascii=False) if data else ""
+                raise RuntimeError(
+                    error or f"email_submit_http_{getattr(resp, 'status_code', 'unknown')}"
+                    + (f": {detail}" if detail else "")
+                )
+            step(index, "邮箱提交完成")
 
-        if resp is None or resp.status_code != 200:
-            data = _response_json(resp) if resp is not None else {}
-            detail = json.dumps(data, ensure_ascii=False) if data else ""
-            raise RuntimeError(
-                error or f"email_submit_http_{getattr(resp, 'status_code', 'unknown')}"
-                + (f": {detail}" if detail else "")
+        def _verify_password_once():
+            headers = _login_json_headers(f"{auth_base}/log-in/password")
+            headers["openai-sentinel-token"] = build_sentinel_token(
+                login_session, login_device_id, "password_verify"
             )
-        step(index, "邮箱提交完成")
+            return request_with_local_retry(
+                login_session, "post",
+                f"{auth_base}/api/accounts/password/verify",
+                json={"password": password},
+                headers=headers,
+                allow_redirects=False,
+                verify=False
+            )
 
-        # 密码验证
-        step(index, "开始密码校验")
-        headers = _login_json_headers(f"{auth_base}/log-in/password")
-        headers["openai-sentinel-token"] = build_sentinel_token(
-            login_session, login_device_id, "password_verify"
-        )
-        resp, error = request_with_local_retry(
-            login_session, "post",
-            f"{auth_base}/api/accounts/password/verify",
-            json={"password": password},
-            headers=headers,
-            allow_redirects=False,
-            verify=False
-        )
-        if resp is None or resp.status_code != 200:
-            body = ""
-            try:
-                body = (resp.text or "")[:500] if resp is not None else ""
-            except Exception:
-                pass
-            raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', '')}_body={body}")
-        step(index, "密码校验完成")
+        def _verify_password_with_reauth() -> None:
+            nonlocal resp, error
+            step(index, "开始密码校验")
+            for attempt in range(3):
+                if attempt:
+                    step(index, f"密码校验 HTTP 409，重新登录状态后重试({attempt + 1}/3)", "yellow")
+                    _clear_login_auth_cookies()
+                    _do_login_authorize(f"password-{attempt + 1}")
+                    _submit_email_with_reauth()
+                resp, error = _verify_password_once()
+                if resp is not None and resp.status_code == 409:
+                    continue
+                break
+            if resp is None or resp.status_code != 200:
+                body = ""
+                try:
+                    body = (resp.text or "")[:500] if resp is not None else ""
+                except Exception:
+                    pass
+                raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', '')}_body={body}")
+            step(index, "密码校验完成")
+
+        resp = None
+        error = ""
+        _do_login_authorize("initial")
+        _submit_email_with_reauth()
+        _verify_password_with_reauth()
 
         payload = _response_json(resp)
         continue_url = str(payload.get("continue_url") or "").strip()
@@ -690,7 +712,8 @@ class PlatformRegistrar:
         email = str(mailbox.get("address") or "").strip()
         if not email:
             raise RuntimeError("邮箱服务未返回 address")
-        step(index, f"邮箱创建完成: {email}")
+        label = str(mailbox.get("label") or "")
+        step(index, f"邮箱创建完成[{label}]: {email}")
         password = _random_password()
         first_name, last_name = _random_name()
         self._platform_authorize(email, index)
@@ -723,7 +746,9 @@ def worker(index: int) -> dict:
         cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_account_items([result])
-        account_service.refresh_accounts([access_token])
+        refresh_result = account_service.refresh_accounts([access_token])
+        if refresh_result.get("errors"):
+            step(index, f"账号已保存，刷新状态暂未成功，稍后可重试: {refresh_result['errors']}", "yellow")
         with stats_lock:
             stats["done"] += 1
             stats["success"] += 1

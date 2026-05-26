@@ -138,19 +138,13 @@ def assistant_history_messages(messages: list[dict[str, Any]]) -> list[str]:
     return [str(item.get("content") or "") for item in messages if item.get("role") == "assistant" and item.get("content")]
 
 
-def build_image_prompt(prompt: str, size: str | None) -> str:
-    if not size:
-        return prompt
-    if size not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
-        return f"{prompt.strip()}\n\n输出图片，宽高比为 {size}。"
-    hint = {
-        "1:1": "输出为 1:1 正方形构图，主体居中，适合正方形画幅。",
-        "16:9": "输出为 16:9 横屏构图，适合宽画幅展示。",
-        "9:16": "输出为 9:16 竖屏构图，适合竖版画幅展示。",
-        "4:3": "输出为 4:3 比例，兼顾宽度与高度，适合展示画面细节。",
-        "3:4": "输出为 3:4 比例，纵向构图，适合人物肖像或竖向场景。",
-    }[size]
-    return f"{prompt.strip()}\n\n{hint}"
+def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> str:
+    hints = []
+    if size:
+        hints.append(f"输出图片尺寸为 {size}。")
+    if quality:
+        hints.append(f"输出图片质量为 {quality}。")
+    return f"{prompt.strip()}\n\n{''.join(hints)}" if hints else prompt
 
 
 def encoding_for_model(model: str):
@@ -220,6 +214,7 @@ class ConversationRequest:
     images: list[str] | None = None
     n: int = 1
     size: str | None = None
+    quality: str = "auto"
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
@@ -483,12 +478,13 @@ def conversation_events(
     prompt: str = "",
     images: list[str] | None = None,
     size: str | None = None,
+    quality: str = "auto",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = str(model or "").strip() in IMAGE_MODELS
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
-    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size)) if image_model else prompt
+    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality)) if image_model else prompt
     payloads = backend.stream_conversation(
         messages=normalized,
         model=model,
@@ -526,8 +522,12 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
         except Exception as exc:
             error_message = str(exc)
             if token and not emitted and is_token_invalid_error(error_message):
-                account_service.remove_invalid_token(token, "text_stream")
-                token = account_service.get_text_access_token(attempted_tokens)
+                refreshed_token = account_service.refresh_access_token(token, force=True, event="text_stream")
+                if refreshed_token and refreshed_token != token and refreshed_token not in attempted_tokens:
+                    token = refreshed_token
+                else:
+                    account_service.remove_invalid_token(token, "text_stream")
+                    token = account_service.get_text_access_token(attempted_tokens)
                 if token:
                     continue
             raise
@@ -550,6 +550,7 @@ def stream_image_outputs(
             model=request.model,
             images=request.images or [],
             size=request.size,
+            quality=request.quality,
     ):
         last = event
         if event.get("type") == "conversation.delta":
@@ -681,6 +682,10 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 last_error = str(exc)
                 logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
                 if not emitted_for_token and is_token_invalid_error(last_error):
+                    refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
+                    if refreshed_token and refreshed_token != token:
+                        token = refreshed_token
+                        continue
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
                 raise _image_error_from_upstream(exc, last_error) from exc

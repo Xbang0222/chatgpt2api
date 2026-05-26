@@ -27,6 +27,10 @@ type ImageTransform = {
   y: number;
 };
 
+type TouchPoints = {
+  [index: number]: React.Touch;
+};
+
 type TouchGesture =
   | {
       type: "swipe";
@@ -54,13 +58,13 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function getTouchDistance(touches: TouchList) {
+function getTouchDistance(touches: TouchPoints) {
   const first = touches[0];
   const second = touches[1];
   return Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY);
 }
 
-function getTouchCenter(touches: TouchList) {
+function getTouchCenter(touches: TouchPoints) {
   const first = touches[0];
   const second = touches[1];
   return {

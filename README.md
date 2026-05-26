@@ -57,6 +57,15 @@ bun install
 bun run dev
 ```
 
+后续更新新版本：
+
+```bash
+docker pull ghcr.io/basketikun/chatgpt2api:latest
+docker-compose down
+docker-compose up -d
+
+```
+
 ### 存储后端配置
 
 支持通过环境变量 `STORAGE_BACKEND` 切换存储方式：
@@ -252,14 +261,14 @@ curl http://localhost:8000/v1/images/edits \
 <summary>字段说明</summary>
 <br>
 
-| 字段       | 说明                                  |
-|:---------|:------------------------------------|
-| `model`  | 图片模型， `gpt-image-2`                 |
-| `prompt` | 图片编辑提示词                             |
-| `n`      | 生成数量，当前后端限制为 `1-4`                  |
-| `image`  | 需要编辑的图片文件，使用 multipart/form-data 上传 |
-| `images` | JSON 图片引用数组，支持 `{"image_url": "https://..."}` |
-| `image_url` | 表单模式下也可直接传图片链接，支持重复字段传多张图          |
+| 字段          | 说明                                            |
+|:------------|:----------------------------------------------|
+| `model`     | 图片模型， `gpt-image-2`                           |
+| `prompt`    | 图片编辑提示词                                       |
+| `n`         | 生成数量，当前后端限制为 `1-4`                            |
+| `image`     | 需要编辑的图片文件，使用 multipart/form-data 上传           |
+| `images`    | JSON 图片引用数组，支持 `{"image_url": "https://..."}` |
+| `image_url` | 表单模式下也可直接传图片链接，支持重复字段传多张图                     |
 
 <br>
 </details>
