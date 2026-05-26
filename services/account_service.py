@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,7 @@ class AccountService:
     _REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS = 6 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE = 3
     _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60
+    _REMOTE_INFO_CACHE_TTL_SECONDS = 60.0
     _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
     _OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
     _OAUTH_USER_AGENT = (
@@ -46,8 +48,6 @@ class AccountService:
         self._cumulative_total = self._load_cumulative_total()
         self._remote_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._remote_info_cache_lock = Lock()
-
-    _REMOTE_INFO_CACHE_TTL_SECONDS = 60.0
 
     def _get_cumulative_file(self) -> Path:
         from services.config import DATA_DIR
@@ -806,15 +806,22 @@ class AccountService:
             return dict(account)
         return None
 
-    def fetch_remote_info(self, access_token: str, event: str = "fetch_remote_info") -> dict[str, Any] | None:
+    def fetch_remote_info(
+        self,
+        access_token: str,
+        event: str = "fetch_remote_info",
+        *,
+        bypass_cache: bool = False,
+    ) -> dict[str, Any] | None:
         if not access_token:
             raise ValueError("access_token is required")
 
         active_token = self.refresh_access_token(access_token, event=f"{event}:preflight") or access_token
 
-        cached = self._get_cached_remote_info(active_token)
-        if cached is not None:
-            return cached
+        if not bypass_cache:
+            cached = self._get_cached_remote_info(active_token)
+            if cached is not None:
+                return cached
 
         try:
             from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
@@ -822,9 +829,10 @@ class AccountService:
         except InvalidAccessTokenError as exc:
             refreshed_token = self.refresh_access_token(active_token, force=True, event=f"{event}:invalid_access_token")
             if refreshed_token and refreshed_token != active_token:
-                cached = self._get_cached_remote_info(refreshed_token)
-                if cached is not None:
-                    return cached
+                if not bypass_cache:
+                    cached = self._get_cached_remote_info(refreshed_token)
+                    if cached is not None:
+                        return cached
                 try:
                     result = OpenAIBackendAPI(refreshed_token).get_user_info()
                 except InvalidAccessTokenError as retry_exc:
@@ -841,30 +849,42 @@ class AccountService:
         self._store_cached_remote_info(active_token, account)
         return account
 
-    def _get_cached_remote_info(self, token: str) -> dict[str, Any] | None:
+    def _resolve_cache_key(self, token: str) -> str:
         if not token:
+            return ""
+        with self._lock:
+            return self._resolve_access_token_locked(token)
+
+    def _get_cached_remote_info(self, token: str) -> dict[str, Any] | None:
+        key = self._resolve_cache_key(token)
+        if not key:
             return None
         now = time.time()
         with self._remote_info_cache_lock:
-            entry = self._remote_info_cache.get(token)
+            entry = self._remote_info_cache.get(key)
             if entry is None:
                 return None
             stored_at, payload = entry
             if now - stored_at > self._REMOTE_INFO_CACHE_TTL_SECONDS:
-                self._remote_info_cache.pop(token, None)
+                self._remote_info_cache.pop(key, None)
                 return None
-            return dict(payload)
+            return copy.deepcopy(payload)
 
     def _store_cached_remote_info(self, token: str, payload: dict[str, Any] | None) -> None:
-        if not token or not isinstance(payload, dict):
+        if not isinstance(payload, dict):
+            return
+        key = self._resolve_cache_key(token)
+        if not key:
             return
         with self._remote_info_cache_lock:
-            self._remote_info_cache[token] = (time.time(), dict(payload))
+            self._remote_info_cache[key] = (time.time(), copy.deepcopy(payload))
 
     def _invalidate_remote_info_cache(self, token: str) -> None:
         if not token:
             return
+        key = self._resolve_cache_key(token) or token
         with self._remote_info_cache_lock:
+            self._remote_info_cache.pop(key, None)
             self._remote_info_cache.pop(token, None)
 
     def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
@@ -878,7 +898,7 @@ class AccountService:
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self.fetch_remote_info, token, "refresh_accounts"): token
+                executor.submit(self.fetch_remote_info, token, "refresh_accounts", bypass_cache=True): token
                 for token in access_tokens
             }
             for future in as_completed(futures):
